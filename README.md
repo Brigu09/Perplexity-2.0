@@ -36,7 +36,7 @@ project-root/
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/brigu09/Perplexity-2.0.git
+   git clone https://github.com/Brigu09/Perplexity-2.0.git
    cd Perplexity-2.0
    ```
 
