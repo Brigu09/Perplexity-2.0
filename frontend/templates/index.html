@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Perplexity 2.0 - Live Web Search Agent</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <div class="logo">
+                <i class="fas fa-brain"></i>
+                <h1>Perplexity 2.0</h1>
+            </div>
+            <div class="header-actions">
+                <button id="clear-btn" title="New Chat">
+                    <i class="fas fa-plus"></i>
+                </button>
+            </div>
+        </header>
+
+        <main>
+            <div class="chat-container" id="chat-container">
+                <div class="welcome-message">
+                    <h2>Hello! I'm your AI research assistant.</h2>
+                    <p>Ask me anything and I'll search the web to find answers for you.</p>
+                    <div class="suggestions">
+                        <button class="suggestion-btn">What are the latest breakthroughs in quantum computing?</button>
+                        <button class="suggestion-btn">Explain the current state of renewable energy technology</button>
+                        <button class="suggestion-btn">What's happening with AI regulation globally?</button>
+                        <button class="suggestion-btn">How has remote work affected productivity?</button>
+                    </div>
+                </div>
+                <!-- Chat messages will be inserted here -->
+            </div>
+        </main>
+
+        <footer>
+            <div class="input-container">
+                <textarea id="user-input" placeholder="Ask anything..." rows="1"></textarea>
+                <button id="send-btn" title="Send">
+                    <i class="fas fa-paper-plane"></i>
+                </button>
+            </div>
+            <div class="attribution">
+                Powered by Groq • Tavily • LangChain • Langgraph • FastAPI            </div>
+        </footer>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const chatContainer = document.getElementById('chat-container');
+            const userInput = document.getElementById('user-input');
+            const sendBtn = document.getElementById('send-btn');
+            const clearBtn = document.getElementById('clear-btn');
+            const suggestionBtns = document.querySelectorAll('.suggestion-btn');
+            
+            let checkpointId = null;
+            let currentMessageContainer = null;
+            let activeConnection = null;
+            
+            // Auto-resize textarea as user types
+            userInput.addEventListener('input', () => {
+                userInput.style.height = 'auto';
+                userInput.style.height = Math.min(userInput.scrollHeight, 150) + 'px';
+            });
+            
+            // Handle Enter key (Send message on Enter, new line with Shift+Enter)
+            userInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+            
+            // Send button click handler
+            sendBtn.addEventListener('click', sendMessage);
+            
+            // Clear button (New Chat) handler
+            clearBtn.addEventListener('click', () => {
+                if (confirm('Start a new conversation?')) {
+                    chatContainer.innerHTML = '';
+                    checkpointId = null;
+                    
+                    // Add welcome message back
+                    chatContainer.innerHTML = `
+                        <div class="welcome-message">
+                            <h2>Hello! I'm your AI research assistant.</h2>
+                            <p>Ask me anything and I'll search the web to find answers for you.</p>
+                            <div class="suggestions">
+                                <button class="suggestion-btn">What are the latest breakthroughs in quantum computing?</button>
+                                <button class="suggestion-btn">Explain the current state of renewable energy technology</button>
+                                <button class="suggestion-btn">What's happening with AI regulation globally?</button>
+                                <button class="suggestion-btn">How has remote work affected productivity?</button>
+                            </div>
+                        </div>
+                    `;
+                    
+                    // Reattach event listeners to new buttons
+                    document.querySelectorAll('.suggestion-btn').forEach(btn => {
+                        btn.addEventListener('click', () => {
+                            userInput.value = btn.textContent;
+                            userInput.style.height = 'auto';
+                            userInput.style.height = Math.min(userInput.scrollHeight, 150) + 'px';
+                            sendMessage();
+                        });
+                    });
+                }
+            });
+            
+            // Add event listeners to suggestion buttons
+            suggestionBtns.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    userInput.value = btn.textContent;
+                    userInput.style.height = 'auto';
+                    userInput.style.height = Math.min(userInput.scrollHeight, 150) + 'px';
+                    sendMessage();
+                });
+            });
+            
+            function sendMessage() {
+                const message = userInput.value.trim();
+                if (!message) return;
+                
+                // Close any existing SSE connection
+                if (activeConnection) {
+                    activeConnection.close();
+                }
+                
+                // Add user message to chat
+                const userMessageElement = document.createElement('div');
+                userMessageElement.className = 'message user-message';
+                userMessageElement.innerHTML = `
+                    <div class="message-avatar">
+                        <i class="fas fa-user"></i>
+                    </div>
+                    <div class="message-content">
+                        <p>${escapeHtml(message)}</p>
+                    </div>
+                `;
+                
+                // Remove welcome message if it exists
+                const welcomeMessage = document.querySelector('.welcome-message');
+                if (welcomeMessage) {
+                    chatContainer.innerHTML = '';
+                }
+                
+                chatContainer.appendChild(userMessageElement);
+                
+                // Create AI message container
+                const aiMessageElement = document.createElement('div');
+                aiMessageElement.className = 'message ai-message';
+                aiMessageElement.innerHTML = `
+                    <div class="message-avatar">
+                        <i class="fas fa-brain"></i>
+                    </div>
+                    <div class="message-content">
+                        <div class="ai-thinking">
+                            <div class="typing-indicator">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </div>
+                        </div>
+                        <div class="main-content"></div>
+                        <div class="search-info hidden">
+                            <div class="search-status">
+                                <i class="fas fa-search"></i>
+                                <span class="search-query"></span>
+                            </div>
+                            <div class="sources-container hidden">
+                                <h4>Sources:</h4>
+                                <ul class="sources-list"></ul>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                chatContainer.appendChild(aiMessageElement);
+                currentMessageContainer = aiMessageElement.querySelector('.main-content');
+                
+                // Clear input and reset height
+                userInput.value = '';
+                userInput.style.height = 'auto';
+                
+                // Scroll to bottom
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+                
+                // Build the SSE endpoint URL
+                let endpoint = `/chat_stream/${encodeURIComponent(message)}`;
+                if (checkpointId) {
+                    endpoint += `?checkpoint_id=${encodeURIComponent(checkpointId)}`;
+                }
+                
+                // Connect to SSE endpoint
+                const eventSource = new EventSource(endpoint);
+                activeConnection = eventSource;
+                
+                eventSource.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    
+                    // Remove typing indicator once we get first data
+                    const typingIndicator = aiMessageElement.querySelector('.ai-thinking');
+                    if (typingIndicator) {
+                        typingIndicator.remove();
+                    }
+                    
+                    switch (data.type) {
+                        case 'checkpoint':
+                            checkpointId = data.checkpoint_id;
+                            console.log('Received checkpoint ID:', checkpointId);
+                            break;
+                            
+                        case 'content':
+                            // Replace escaped characters
+                            const content = data.content
+                                .replace(/\\n/g, '\n')
+                                .replace(/\\'/g, "'");
+                                
+                            // Append to current message with Markdown parsing
+                            if (!currentMessageContainer.innerHTML) {
+                                currentMessageContainer.innerHTML = content;
+                            } else {
+                                currentMessageContainer.innerHTML += content;
+                            }
+                            
+                            // Convert any markdown syntax
+                            renderMarkdown(currentMessageContainer);
+                            break;
+                            
+                        case 'search_start':
+                            const searchInfo = aiMessageElement.querySelector('.search-info');
+                            const searchQuery = aiMessageElement.querySelector('.search-query');
+                            
+                            searchInfo.classList.remove('hidden');
+                            searchQuery.textContent = `Searching for: "${data.query}"`;
+                            break;
+                            
+                        case 'search_results':
+                            const sourcesContainer = aiMessageElement.querySelector('.sources-container');
+                            const sourcesList = aiMessageElement.querySelector('.sources-list');
+                            
+                            sourcesContainer.classList.remove('hidden');
+                            
+                            // Add sources/citations
+                            if (data.urls && data.urls.length > 0) {
+                                data.urls.forEach(url => {
+                                    // Create hostname for display
+                                    const urlObj = new URL(url);
+                                    const hostname = urlObj.hostname.replace('www.', '');
+                                    
+                                    const li = document.createElement('li');
+                                    li.innerHTML = `<a href="${url}" target="_blank" rel="noopener noreferrer">
+                                        <i class="fas fa-external-link-alt"></i> ${hostname}
+                                    </a>`;
+                                    sourcesList.appendChild(li);
+                                });
+                            }
+                            break;
+                            
+                        case 'end':
+                            eventSource.close();
+                            activeConnection = null;
+                            break;
+                    }
+                    
+                    // Scroll to bottom with each update
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                };
+                
+                eventSource.onerror = (error) => {
+                    console.error('EventSource error:', error);
+                    
+                    // Remove typing indicator and show error
+                    const typingIndicator = aiMessageElement.querySelector('.ai-thinking');
+                    if (typingIndicator) {
+                        typingIndicator.remove();
+                    }
+                    
+                    if (!currentMessageContainer.innerHTML) {
+                        currentMessageContainer.innerHTML = '<div class="error-message">Sorry, there was an error processing your request. Please try again.</div>';
+                    }
+                    
+                    eventSource.close();
+                    activeConnection = null;
+                };
+            }
+            
+            // Helper function to escape HTML
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+            
+            // Simple markdown rendering for code blocks and basic formatting
+            function renderMarkdown(element) {
+                // Replace code blocks
+                let html = element.innerHTML;
+                
+                // Replace ```code``` blocks
+                html = html.replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>');
+                
+                // Replace `inline code`
+                html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+                
+                // Replace **bold**
+                html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+                
+                // Replace *italic*
+                html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+                
+                element.innerHTML = html;
+            }
+        });
+    </script>
+</body>
+</html>
