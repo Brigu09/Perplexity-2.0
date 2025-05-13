@@ -5,4 +5,7 @@ langgraph
 fastapi
 uvicorn
 langchain_groq
+pyppeteer
+ipykernel
+jinja2
 -e .
